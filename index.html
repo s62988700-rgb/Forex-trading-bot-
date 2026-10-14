@@ -1,0 +1,232 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forex Signal Bot V1</title>
+<style>
+body{margin:0;padding:16px;background:#0b1020;color:#edf2ff;font:15px Arial,sans-serif}
+main{max-width:700px;margin:auto}
+.panel{background:#151d30;border:1px solid #34415b;border-radius:14px;padding:16px;margin:14px 0}
+label{display:block;margin:12px 0 5px}
+input,select,button{width:100%;box-sizing:border-box;padding:12px;border-radius:8px;border:1px solid #34415b;margin-bottom:8px;font-size:15px}
+input,select{background:#0b1324;color:white}
+button{background:#76a9ff;color:#071326;font-weight:bold;border:0}
+.metric{background:#0b1324;padding:12px;border-radius:8px;overflow-wrap:anywhere}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+small{color:#9aabc5}
+#signal{text-align:center;font-size:27px;font-weight:bold;padding:18px;background:#202c42;border-radius:9px}
+.buy{color:#27d99b}.sell{color:#ff657a}.wait{color:#ffd479}
+p{color:#a9b8d0;overflow-wrap:anywhere}
+table{width:100%;font-size:12px;border-collapse:collapse}
+td,th{text-align:left;padding:8px 3px;border-bottom:1px solid #34415b}
+</style>
+</head>
+<body>
+<main>
+<h1>Forex Signal Bot</h1>
+<p>Version 1 · Real candle data · Manual trading only</p>
+
+<div class="panel">
+<h3>Market settings</h3>
+<label>Forex pair</label>
+<select id="pair">
+<option>EUR/USD</option><option>GBP/USD</option>
+<option>USD/JPY</option><option>AUD/USD</option>
+<option>USD/CAD</option><option>EUR/GBP</option>
+</select>
+<label>Timeframe</label>
+<select id="tf">
+<option value="5min">5 minutes</option>
+<option value="15min">15 minutes</option>
+<option value="1h">1 hour</option>
+</select>
+<label>Twelve Data API key</label>
+<input id="api" type="password" placeholder="Paste your API key">
+<button id="run">FETCH DATA & ANALYZE</button>
+<p id="status">Not connected. Enter an API key to start.</p>
+</div>
+
+<div class="panel">
+<h3>Current signal</h3>
+<div id="signal" class="wait">WAIT</div>
+<p id="reason">No analysis yet.</p>
+<div class="grid">
+<div class="metric"><small>Latest close</small><div id="price">—</div></div>
+<div class="metric"><small>Candle time</small><div id="time">—</div></div>
+<div class="metric"><small>EMA 9</small><div id="e9">—</div></div>
+<div class="metric"><small>EMA 21</small><div id="e21">—</div></div>
+<div class="metric"><small>Entry</small><div id="entry">—</div></div>
+<div class="metric"><small>ATR 14</small><div id="atr">—</div></div>
+<div class="metric"><small>Stop Loss</small><div id="sl">—</div></div>
+<div class="metric"><small>Take Profit</small><div id="tp">—</div></div>
+</div>
+<p>Signals are rule-based, not guarantees of profit. Verify every signal before trading.</p>
+</div>
+
+<div class="panel">
+<h3>Signal history</h3>
+<p id="count">0 signals recorded.</p>
+<div style="overflow-x:auto">
+<table><thead><tr><th>Time</th><th>Pair</th><th>Signal</th><th>Entry</th></tr></thead>
+<tbody id="history"></tbody></table>
+</div>
+<button id="csv">EXPORT CSV</button>
+</div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let records = [];
+
+function ema(values, period) {
+  const k = 2 / (period + 1);
+  let result = values[0];
+  for (let i = 1; i < values.length; i++)
+    result = values[i] * k + result * (1 - k);
+  return result;
+}
+
+function averageTrueRange(candles, period = 14) {
+  const ranges = [];
+  for (let i = 1; i < candles.length; i++) {
+    const c = candles[i], prev = candles[i - 1];
+    ranges.push(Math.max(
+      c.high - c.low,
+      Math.abs(c.high - prev.close),
+      Math.abs(c.low - prev.close)
+    ));
+  }
+  return ranges.slice(-period).reduce((a,b) => a+b, 0) /
+    Math.min(period, ranges.length);
+}
+
+function fmt(n) {
+  return Number.isFinite(n) ? n.toFixed(5) : "—";
+}
+
+$("run").addEventListener("click", async () => {
+  const key = $("api").value.trim();
+  const pair = $("pair").value;
+  const interval = $("tf").value;
+
+  if (!key) {
+    $("status").textContent = "Enter your Twelve Data API key first.";
+    return;
+  }
+
+  $("run").disabled = true;
+  $("status").textContent = "Fetching real market candles…";
+
+  try {
+    const url = new URL("https://api.twelvedata.com/time_series");
+    url.searchParams.set("symbol", pair);
+    url.searchParams.set("interval", interval);
+    url.searchParams.set("outputsize", "100");
+    url.searchParams.set("apikey", key);
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!response.ok || data.status === "error" || !data.values) {
+      throw new Error(data.message || "No candle data returned.");
+    }
+
+    const candles = data.values.map(v => ({
+      time: v.datetime,
+      open: Number(v.open),
+      high: Number(v.high),
+      low: Number(v.low),
+      close: Number(v.close)
+    })).reverse();
+
+    if (candles.length < 30 ||
+        candles.some(c => !Number.isFinite(c.close))) {
+      throw new Error("Not enough valid candles for analysis.");
+    }
+
+    const closes = candles.map(c => c.close);
+    const last = candles[candles.length - 1];
+    const fast = ema(closes.slice(-60), 9);
+    const slow = ema(closes.slice(-80), 21);
+    const prevFast = ema(closes.slice(-61, -1), 9);
+    const prevSlow = ema(closes.slice(-81, -1), 21);
+    const atr = averageTrueRange(candles);
+    let signal = "WAIT";
+    let reason = "No fresh EMA crossover. Wait for the next setup.";
+
+    if (prevFast <= prevSlow && fast > slow) {
+      signal = "BUY";
+      reason = "EMA 9 crossed above EMA 21.";
+    } else if (prevFast >= prevSlow && fast < slow) {
+      signal = "SELL";
+      reason = "EMA 9 crossed below EMA 21.";
+    }
+
+    $("signal").textContent = signal;
+    $("signal").className = signal.toLowerCase();
+    $("reason").textContent = reason;
+    $("price").textContent = fmt(last.close);
+    $("time").textContent = last.time;
+    $("e9").textContent = fmt(fast);
+    $("e21").textContent = fmt(slow);
+    $("atr").textContent = fmt(atr);
+
+    const entry = last.close;
+    const sl = signal === "BUY" ? entry - 1.5 * atr :
+               signal === "SELL" ? entry + 1.5 * atr : NaN;
+    const tp = signal === "BUY" ? entry + 3 * atr :
+               signal === "SELL" ? entry - 3 * atr : NaN;
+
+    $("entry").textContent = signal === "WAIT" ? "—" : fmt(entry);
+    $("sl").textContent = fmt(sl);
+    $("tp").textContent = fmt(tp);
+    $("status").textContent =
+      "Data received successfully. Candles returned: " + candles.length +
+      ". Check the candle time and provider limits.";
+
+    if (signal !== "WAIT") {
+      records.unshift({
+        time: new Date().toISOString(),
+        pair, signal, entry
+      });
+      renderHistory();
+    }
+  } catch (err) {
+    $("status").textContent = "Error: " + err.message +
+      " Check your API key, internet connection and data allowance.";
+  } finally {
+    $("run").disabled = false;
+  }
+});
+
+function renderHistory() {
+  $("count").textContent = records.length + " signals recorded.";
+  $("history").innerHTML = records.map(r =>
+    "<tr><td>" + r.time + "</td><td>" + r.pair +
+    "</td><td>" + r.signal + "</td><td>" +
+    Number(r.entry).toFixed(5) + "</td></tr>"
+  ).join("");
+}
+
+$("csv").addEventListener("click", () => {
+  if (!records.length) {
+    $("status").textContent = "No signals to export yet.";
+    return;
+  }
+  const rows = [["Time","Pair","Signal","Entry"],
+    ...records.map(r => [r.time,r.pair,r.signal,r.entry])];
+  const csv = rows.map(row => row.map(v =>
+    '"' + String(v).replace(/"/g, '""') + '"'
+  ).join(",")).join("\n");
+  const blob = new Blob([csv], {type:"text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "forex-signal-history.csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+</body>
+</html>
